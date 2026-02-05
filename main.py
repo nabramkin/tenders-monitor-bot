@@ -1,220 +1,291 @@
-import asyncio
-import logging
-import sqlite3
-import aiohttp
-import feedparser
-from datetime import datetime
-from fastapi import FastAPI, Request, BackgroundTasks
-import uvicorn
 import os
-from aiogram import Bot, Dispatcher, types, F
+import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import feedparser
+from fastapi import FastAPI, Request
+import uvicorn
+
+from aiogram import Bot, Dispatcher, types
 from aiogram.types import Update
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Конфигурация
-API_TOKEN = os.getenv('BOT_TOKEN')
-CHAT_ID = int(os.getenv('CHAT_ID') or 0)
-WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
-WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost:8000')}{WEBHOOK_PATH}"
 
-# Ключевые слова
+# ----------------------------
+# CONFIG / ENV
+# ----------------------------
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("tender-bot")
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
+
+CHAT_ID = int(os.getenv("CHAT_ID") or "0")
+if CHAT_ID == 0:
+    log.warning("CHAT_ID is not set (0). Bot will NOT be able to send messages.")
+
+COMPANIES_RAW = os.getenv("COMPANIES", "").strip()
+
+# Render hostname for webhook
+RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME") or "localhost:8000"
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"https://{RENDER_HOST}{WEBHOOK_PATH}"
+
+PORT = int(os.getenv("PORT", "8000"))
+
+# Москва
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+
+# RSS платформы
+PLATFORMS = {
+    "Bidzaar": "https://bidzaar.com/rss/new",
+    "Сбербанк-АСТ": "https://utp.sberbank-ast.ru/rss/rss.xml",
+    "ЭТП Газпромбанк": "https://etpgpb.ru/rss/rss.xml",
+    "РТС-Тендер": "https://www.rts-tender.ru/rss/rss.ashx",
+    "РосТендер": "https://rostender.info/rss",
+    "BiCoTender": "https://www.bicotender.ru/rss.xml",
+    "B2B-Center": "https://www.b2b-center.ru/rss/rss.xml",
+}
+
+# Ключевые слова (оставил твои)
 VENDORS_AND_KEYWORDS = [
-    'Lenovo', 'Dell', 'Cisco', 'Huawei', 'Supermicro', 'Nvidia', 'NetApp', 
-    'IBM', 'Brocade', 'Fortinet', 'Juniper', 'VMware', 'Veeam', 'HPE', 
-    'HP', 'Oracle', 'Fujitsu', 'EMC', 'техническая поддержка', 'сервисная поддержка', 
-    'консалтинг', 'IT услуги', 'IT решения', 'поставка оборудования'
+    "Lenovo", "Dell", "Cisco", "Huawei", "Supermicro", "Nvidia", "NetApp",
+    "IBM", "Brocade", "Fortinet", "Juniper", "VMware", "Veeam", "HPE",
+    "HP", "Oracle", "Fujitsu", "EMC", "техническая поддержка", "сервисная поддержка",
+    "консалтинг", "IT услуги", "IT решения", "поставка оборудования"
 ]
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-scheduler = AsyncIOScheduler()
 
-class Form(StatesGroup):
-    waiting_company = State()
-    waiting_companies_list = State()
+# ----------------------------
+# PARSING COMPANIES FROM ENV
+# ----------------------------
+def parse_companies(raw: str) -> list[tuple[str, str]]:
+    """
+    Returns list of (name, inn).
+    Accepts:
+      - lines: "Name|INN"
+      - or single line separated by ';'
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
 
-# База данных
-def init_db():
-    conn = sqlite3.connect('tenders.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS companies 
-                 (inn TEXT PRIMARY KEY, name TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS seen_tenders 
-                 (url TEXT PRIMARY KEY, title TEXT, company TEXT, 
-                  pub_date TEXT, end_date TEXT, platform TEXT)''')
-    conn.commit()
-    conn.close()
+    # allow both ; and newlines
+    parts = []
+    for chunk in raw.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts.extend([line.strip() for line in chunk.splitlines() if line.strip()])
 
-async def check_tenders():
-    """Проверка тендеров каждые 2 минуты"""
-    print(f"[{datetime.now()}] Проверка тендеров...")
-    
-    conn = sqlite3.connect('tenders.db')
-    c = conn.cursor()
-    companies = c.execute("SELECT inn, name FROM companies").fetchall()
-    
+    companies: list[tuple[str, str]] = []
+    for line in parts:
+        if "|" not in line:
+            continue
+        name, inn = line.split("|", 1)
+        name, inn = name.strip(), inn.strip()
+        if name and inn:
+            companies.append((name, inn))
+    return companies
+
+
+def companies_to_text(companies: list[tuple[str, str]]) -> str:
     if not companies:
-        print("Нет компаний")
-        conn.close()
-        return
-    
-    seen_urls = {row[0] for row in c.execute("SELECT url FROM seen_tenders")}
-    new_tenders = []
-    
-    platforms = {
-        'Bidzaar': 'https://bidzaar.com/rss/new',
-        'Сбербанк-АСТ': 'https://utp.sberbank-ast.ru/rss/rss.xml',
-        'ЭТП Газпромбанк': 'https://etpgpb.ru/rss/rss.xml',
-        'РТС-Тендер': 'https://www.rts-tender.ru/rss/rss.ashx',
-        'РосТендер': 'https://rostender.info/rss',
-        'BiCoTender': 'https://www.bicotender.ru/rss.xml',
-        'B2B-Center': 'https://www.b2b-center.ru/rss/rss.xml',
-    }
-    
-    for platform, rss_url in platforms.items():
+        return "📭 Компаний нет. Задай ENV `COMPANIES` в формате `Название|ИНН`."
+    lines = [f"{i}. **{name}** (`{inn}`)" for i, (name, inn) in enumerate(companies, 1)]
+    return "📋 **Компании:**\n\n" + "\n".join(lines)
+
+
+# ----------------------------
+# BOT
+# ----------------------------
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
+
+
+# ----------------------------
+# CORE LOGIC
+# ----------------------------
+def match_entry(title: str, company_name: str) -> bool:
+    title_lower = (title or "").lower()
+    # must contain at least one keyword
+    if not any(kw.lower() in title_lower for kw in VENDORS_AND_KEYWORDS):
+        return False
+    # must contain company name
+    return company_name.lower() in title_lower
+
+
+def collect_tenders(companies: list[tuple[str, str]]) -> list[dict]:
+    """
+    Collects tenders from RSS *for this run only*.
+    No DB, no history. Dedupe only by URL within this run.
+    """
+    found: list[dict] = []
+    seen_links: set[str] = set()
+
+    for platform, rss_url in PLATFORMS.items():
         try:
             feed = feedparser.parse(rss_url)
-            for entry in feed.entries:
-                title_lower = entry.title.lower()
-                if any(kw.lower() in title_lower for kw in VENDORS_AND_KEYWORDS):
-                    for inn, company_name in companies:
-                        if company_name.lower() in title_lower:
-                            if entry.link not in seen_urls:
-                                new_tenders.append({
-                                    'platform': platform,
-                                    'title': entry.title,
-                                    'url': entry.link,
-                                    'pub_date': getattr(entry, 'published', 'Неизвестно'),
-                                    'end_date': getattr(entry, 'updated', 'Неизвестно'),
-                                    'company': company_name
-                                })
-                                c.execute('''INSERT OR IGNORE INTO seen_tenders 
-                                           (url, title, company, pub_date, end_date, platform)
-                                           VALUES (?, ?, ?, ?, ?, ?)''',
-                                        (entry.link, entry.title, company_name,
-                                         entry.get('published'), entry.get('updated'), platform))
-            conn.commit()
-        except Exception as e:
-            print(f"Ошибка {platform}: {e}")
-    
-    conn.close()
-    
-    for tender in new_tenders:
-        message = f"""🔔 **Новый тендер!**
+            for entry in getattr(feed, "entries", []):
+                title = getattr(entry, "title", "") or ""
+                link = getattr(entry, "link", "") or ""
+                if not link or link in seen_links:
+                    continue
 
-🏢 **Компания**: {tender['company']}
-📋 **Закупка**: {tender['title']}
-🌐 **Площадка**: {tender['platform']}
-📅 **Публикация**: {tender['pub_date']}
-⏰ **Окончание**: {tender['end_date']}
-🔗 {tender['url']}"""
-        try:
-            await bot.send_message(CHAT_ID, message, parse_mode='Markdown')
-            print(f"✅ Отправлено: {tender['title'][:50]}...")
-        except Exception as e:
-            print(f"Ошибка отправки: {e}")
+                title_lower = title.lower()
+                # keyword must be present
+                if not any(kw.lower() in title_lower for kw in VENDORS_AND_KEYWORDS):
+                    continue
 
-# Aiogram handlers
-@dp.message(Command('start'))
+                for company_name, inn in companies:
+                    if company_name.lower() in title_lower:
+                        seen_links.add(link)
+                        pub_date = getattr(entry, "published", None) or getattr(entry, "updated", None) or "Неизвестно"
+                        end_date = getattr(entry, "updated", None) or "Неизвестно"
+
+                        found.append({
+                            "platform": platform,
+                            "title": title,
+                            "url": link,
+                            "pub_date": str(pub_date),
+                            "end_date": str(end_date),
+                            "company": company_name,
+                            "inn": inn,
+                        })
+                        break
+        except Exception as e:
+            log.exception("RSS error on %s: %s", platform, e)
+
+    return found
+
+
+async def send_daily_digest():
+    """Runs daily at 10:00 MSK"""
+    companies = parse_companies(COMPANIES_RAW)
+
+    now_msk = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+    log.info("Daily digest at %s MSK. Companies: %d", now_msk, len(companies))
+
+    if CHAT_ID == 0:
+        log.warning("CHAT_ID is 0 -> skip sending")
+        return
+
+    if not companies:
+        await bot.send_message(
+            CHAT_ID,
+            "⚠️ **Нет компаний для мониторинга.**\n\n"
+            "Задай ENV `COMPANIES` в формате:\n"
+            "`Газпром|1234567890`",
+            parse_mode="Markdown"
+        )
+        return
+
+    tenders = collect_tenders(companies)
+
+    # Группируем по компании
+    by_company: dict[str, list[dict]] = {}
+    for t in tenders:
+        by_company.setdefault(t["company"], []).append(t)
+
+    header = f"📌 **Тендеры (дайджест) — {now_msk} MSK**\n\n"
+    if not tenders:
+        msg = header + "Ничего подходящего не нашёл по заданным компаниям/ключевым словам."
+        await bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+        return
+
+    parts = [header]
+    for company, items in by_company.items():
+        parts.append(f"🏢 **{company}** — {len(items)}\n")
+        # ограничим, чтобы не упереться в лимиты
+        for it in items[:30]:
+            parts.append(
+                f"• **{it['platform']}** — {it['title']}\n"
+                f"  {it['url']}\n"
+            )
+        parts.append("\n")
+
+    text = "".join(parts)
+
+    # Telegram лимит ~4096, режем
+    chunks = [text[i:i + 3500] for i in range(0, len(text), 3500)]
+    for ch in chunks:
+        await bot.send_message(CHAT_ID, ch, parse_mode="Markdown")
+
+
+# ----------------------------
+# HANDLERS
+# ----------------------------
+@dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    await message.reply("🤖 **Бот мониторинга IT-тендеров**\n\n"
-                       "**Команды**:\n"
-                       "• `/add_company` - 1 компания\n"
-                       "• `/load_companies` - список\n"
-                       "• `/list` - все компании\n\n"
-                       "ℹ️ Проверка каждые **2 мин**", parse_mode='Markdown')
+    await message.reply(
+        "🤖 **Tender Bot**\n\n"
+        "Команды:\n"
+        "• `/list` — показать список компаний (из ENV)\n"
+        "• `/run` — выполнить проверку прямо сейчас (ручной запуск)\n\n"
+        "Компании задаются через ENV `COMPANIES`.\n"
+        "Рассылка: каждый день в **10:00 MSK**.",
+        parse_mode="Markdown"
+    )
 
-@dp.message(Command('add_company'))
-async def add_company(message: types.Message, state: FSMContext):
-    await message.reply("➕ **Компания**:\n`Газпром 1234567890`", parse_mode='Markdown')
-    await state.set_state(Form.waiting_company)
 
-@dp.message(Form.waiting_company)
-async def process_company(message: types.Message, state: FSMContext):
-    try:
-        parts = message.text.rsplit(maxsplit=1)
-        name, inn = parts[0].strip(), parts[1].strip()
-        conn = sqlite3.connect('tenders.db')
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO companies (inn, name) VALUES (?, ?)", (inn, name))
-        conn.commit()
-        conn.close()
-        await message.reply(f"✅ **Добавлена**: `{name}` (`{inn}`)", parse_mode='Markdown')
-    except:
-        await message.reply("❌ **Формат**: `Название ИНН`", parse_mode='Markdown')
-    await state.clear()
+@dp.message(Command("list"))
+async def list_handler(message: types.Message):
+    companies = parse_companies(COMPANIES_RAW)
+    await message.reply(companies_to_text(companies), parse_mode="Markdown")
 
-@dp.message(Command('load_companies'))
-async def load_companies(message: types.Message, state: FSMContext):
-    await message.reply("📋 **Список компаний**:\n\n"
-                       "`Газпром 1234567890`\n"
-                       "`Роснефть 7778889990`\n\n"
-                       "**название + ПРОБЕЛ + ИНН**", parse_mode='Markdown')
-    await state.set_state(Form.waiting_companies_list)
 
-@dp.message(Form.waiting_companies_list)
-async def process_companies_list(message: types.Message, state: FSMContext):
-    companies_added = 0
-    lines = message.text.strip().split('\n')
-    conn = sqlite3.connect('tenders.db')
-    c = conn.cursor()
-    
-    for line in lines:
-        line = line.strip()
-        if not line or len(line.split()) < 2: 
-            continue
-        parts = line.rsplit(maxsplit=1)
-        name, inn = parts[0].strip(), parts[1].strip()
-        c.execute("INSERT OR REPLACE INTO companies (inn, name) VALUES (?, ?)", (inn, name))
-        companies_added += 1
-    
-    conn.commit()
-    conn.close()
-    await message.reply(f"✅ **Загружено**: {companies_added} компаний\n`/list`", parse_mode='Markdown')
-    await state.clear()
+@dp.message(Command("run"))
+async def run_now_handler(message: types.Message):
+    await message.reply("⏳ Запускаю проверку и отправку в CHAT_ID…", parse_mode="Markdown")
+    await send_daily_digest()
+    await message.reply("✅ Готово.", parse_mode="Markdown")
 
-@dp.message(Command('list'))
-async def list_companies(message: types.Message):
-    conn = sqlite3.connect('tenders.db')
-    c = conn.cursor()
-    companies = c.execute("SELECT name, inn FROM companies").fetchall()
-    conn.close()
-    
-    if companies:
-        text = f"📋 **Компании** ({len(companies)}):\n\n"
-        for i, (name, inn) in enumerate(companies, 1):
-            text += f"{i}. **{name}** (`{inn}`)\n"
-        await message.reply(text, parse_mode='Markdown')
-    else:
-        await message.reply("📭 **Пусто**\n`/add_company` или `/load_companies`", parse_mode='Markdown')
 
-# FastAPI app
+# ----------------------------
+# FASTAPI
+# ----------------------------
 app = FastAPI()
 
 @app.on_event("startup")
 async def on_startup():
-    init_db()
-    await bot.set_webhook(WEBHOOK_URL)
-    scheduler.add_job(check_tenders, 'interval', minutes=2)
+    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+    log.info("Webhook set: %s", WEBHOOK_URL)
+
+    # каждый день в 10:00 по Москве
+    scheduler.add_job(
+        send_daily_digest,
+        "cron",
+        hour=10,
+        minute=0,
+        coalesce=True,
+        max_instances=1,
+    )
     scheduler.start()
-    print(f"🚀 Webhook: {WEBHOOK_URL}")
-    print("✅ FastAPI + Bot запущены!")
+    log.info("Scheduler started. Daily digest at 10:00 MSK.")
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    await bot.delete_webhook()
-    scheduler.shutdown()
+    try:
+        await bot.delete_webhook()
+    except Exception:
+        pass
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception:
+        pass
 
 @app.post(WEBHOOK_PATH)
-async def webhook(update: dict):
-    telegram_update = Update(**update)
+async def webhook(request: Request):
+    data = await request.json()
+    telegram_update = Update(**data)
     await dp.feed_update(bot, telegram_update)
-    return {}
+    return {"ok": True}
 
 @app.get("/")
 async def root():
@@ -224,6 +295,5 @@ async def root():
 async def health():
     return {"status": "healthy"}
 
-if __name__ == '__main__':
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
