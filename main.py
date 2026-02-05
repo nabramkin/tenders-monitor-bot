@@ -246,6 +246,10 @@ async def run_now_handler(message: types.Message):
     await send_daily_digest()
     await message.reply("✅ Готово.", parse_mode="Markdown")
 
+@dp.message(Command("whoami"))
+async def whoami_handler(message: types.Message):
+    await message.reply(f"chat_id = `{message.chat.id}`", parse_mode="Markdown")
+
 
 # ----------------------------
 # FASTAPI
