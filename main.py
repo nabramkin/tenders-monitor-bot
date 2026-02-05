@@ -59,13 +59,17 @@ async def check_tenders():
     
     # RSS ленты площадок (замените на реальные после регистрации)
     platforms = {
-        'РТС-Тендер': 'https://rss.rts-tender.ru/rss?query=оборудование',  # Пример
-        'Росэлторг': 'https://roseltorg.ru/rss',  # После регистрации
-        'Bidzaar': 'https://bidzaar.com/rss',
-      'B2B Center': 'https://www.b2b-center.ru/rss',
-      'UGMK': 'https://etp.metal-it.ru/rss',
-      
-        # Добавьте остальные
+       platforms = {
+    # Агрегаторы (все площадки разом)
+    'РТС+TenderGuru': 'https://www.rts-tender.ru/rss/rss.ashx',
+    'РосТендер': 'https://rostender.info/rss',
+    'BiCoTender': 'https://www.bicotender.ru/rss.xml',
+    
+    # Прямые площадки
+    'B2B-Center': 'https://www.b2b-center.ru/rss/rss.xml',
+    'Bidzaar': 'https://bidzaar.com/rss/new',
+}
+
     }
     
     async with aiohttp.ClientSession() as session:
