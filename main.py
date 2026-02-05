@@ -80,8 +80,7 @@ async def check_tenders():
                     title = entry.title.lower()
                     
                     # Фильтр по вендорам, ключевым словам и компаниям
-                    if (any(vendor.lower() in title for vendor in VENDORS) or 
-                        any(kw in title for kw in KEYWORDS)):
+                    f any(keyword.lower() in title_lower for keyword in vendors_keywords):
                         
                         for inn, company_name in companies:
                             if company_name.lower() in title or inn in entry.get('summary', ''):
