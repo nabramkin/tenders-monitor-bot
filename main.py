@@ -242,9 +242,15 @@ async def list_handler(message: types.Message):
 
 @dp.message(Command("run"))
 async def run_now_handler(message: types.Message):
-    await message.reply("⏳ Запускаю проверку и отправку в CHAT_ID…", parse_mode="Markdown")
-    await send_daily_digest()
-    await message.reply("✅ Готово.", parse_mode="Markdown")
+    log.info("RUN command received from chat_id=%s text=%r", message.chat.id, message.text)
+    try:
+        await message.reply("⏳ Запускаю проверку…")
+        await send_daily_digest()   # как у тебя сейчас
+        await message.reply("✅ Готово.")
+    except Exception as e:
+        log.exception("Error in /run: %s", e)
+        await message.reply(f"❌ Ошибка при /run: {e}")
+
 
 @dp.message(Command("whoami"))
 async def whoami_handler(message: types.Message):
