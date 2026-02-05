@@ -4,20 +4,24 @@ import sqlite3
 import aiohttp
 import feedparser
 from datetime import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, BackgroundTasks
 import uvicorn
-from contextlib import asynccontextmanager
-from aiogram import Bot, Dispatcher, types
+import os
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import Update
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import os
 
 # Конфигурация
 API_TOKEN = os.getenv('BOT_TOKEN')
-CHAT_ID = int(os.getenv('CHAT_ID'))
+CHAT_ID = int(os.getenv('CHAT_ID') or 0)
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost:8000')}{WEBHOOK_PATH}"
+
+# Ключевые слова
 VENDORS_AND_KEYWORDS = [
     'Lenovo', 'Dell', 'Cisco', 'Huawei', 'Supermicro', 'Nvidia', 'NetApp', 
     'IBM', 'Brocade', 'Fortinet', 'Juniper', 'VMware', 'Veeam', 'HPE', 
@@ -34,9 +38,6 @@ class Form(StatesGroup):
     waiting_company = State()
     waiting_companies_list = State()
 
-# Глобальные переменные для бота
-app_state = {}
-
 # База данных
 def init_db():
     conn = sqlite3.connect('tenders.db')
@@ -50,7 +51,7 @@ def init_db():
     conn.close()
 
 async def check_tenders():
-    """Ежедневная проверка тендеров"""
+    """Проверка тендеров каждые 2 минуты"""
     print(f"[{datetime.now()}] Проверка тендеров...")
     
     conn = sqlite3.connect('tenders.db')
@@ -58,49 +59,48 @@ async def check_tenders():
     companies = c.execute("SELECT inn, name FROM companies").fetchall()
     
     if not companies:
-        print("Нет компаний для мониторинга")
+        print("Нет компаний")
+        conn.close()
         return
     
     seen_urls = {row[0] for row in c.execute("SELECT url FROM seen_tenders")}
     new_tenders = []
     
-   platforms = {
-    'Bidzaar': 'https://bidzaar.com/rss/new',
-    'Сбербанк-АСТ': 'https://utp.sberbank-ast.ru/rss/rss.xml',
-    'ЭТП Газпромбанк': 'https://etpgpb.ru/rss/rss.xml',
-    'РТС-Тендер': 'https://www.rts-tender.ru/rss/rss.ashx',
-    'РосТендер': 'https://rostender.info/rss',
-    'BiCoTender': 'https://www.bicotender.ru/rss.xml',
-    'B2B-Center': 'https://www.b2b-center.ru/rss/rss.xml',
-}
-
+    platforms = {
+        'Bidzaar': 'https://bidzaar.com/rss/new',
+        'Сбербанк-АСТ': 'https://utp.sberbank-ast.ru/rss/rss.xml',
+        'ЭТП Газпромбанк': 'https://etpgpb.ru/rss/rss.xml',
+        'РТС-Тендер': 'https://www.rts-tender.ru/rss/rss.ashx',
+        'РосТендер': 'https://rostender.info/rss',
+        'BiCoTender': 'https://www.bicotender.ru/rss.xml',
+        'B2B-Center': 'https://www.b2b-center.ru/rss/rss.xml',
+    }
     
-    async with aiohttp.ClientSession() as session:
-        for platform, rss_url in platforms.items():
-            try:
-                feed = feedparser.parse(rss_url)
-                for entry in feed.entries:
-                    title_lower = entry.title.lower()
-                    if any(kw.lower() in title_lower for kw in VENDORS_AND_KEYWORDS):
-                        for inn, company_name in companies:
-                            if company_name.lower() in title_lower or inn in entry.get('summary', ''):
-                                if entry.link not in seen_urls:
-                                    new_tenders.append({
-                                        'platform': platform,
-                                        'title': entry.title,
-                                        'url': entry.link,
-                                        'pub_date': getattr(entry, 'published', 'Неизвестно'),
-                                        'end_date': getattr(entry, 'updated', 'Неизвестно'),
-                                        'company': company_name
-                                    })
-                                    c.execute('''INSERT OR IGNORE INTO seen_tenders 
-                                               (url, title, company, pub_date, end_date, platform)
-                                               VALUES (?, ?, ?, ?, ?, ?)''',
-                                            (entry.link, entry.title, company_name,
-                                             entry.get('published'), entry.get('updated'), platform))
-                conn.commit()
-            except Exception as e:
-                print(f"Ошибка {platform}: {e}")
+    for platform, rss_url in platforms.items():
+        try:
+            feed = feedparser.parse(rss_url)
+            for entry in feed.entries:
+                title_lower = entry.title.lower()
+                if any(kw.lower() in title_lower for kw in VENDORS_AND_KEYWORDS):
+                    for inn, company_name in companies:
+                        if company_name.lower() in title_lower:
+                            if entry.link not in seen_urls:
+                                new_tenders.append({
+                                    'platform': platform,
+                                    'title': entry.title,
+                                    'url': entry.link,
+                                    'pub_date': getattr(entry, 'published', 'Неизвестно'),
+                                    'end_date': getattr(entry, 'updated', 'Неизвестно'),
+                                    'company': company_name
+                                })
+                                c.execute('''INSERT OR IGNORE INTO seen_tenders 
+                                           (url, title, company, pub_date, end_date, platform)
+                                           VALUES (?, ?, ?, ?, ?, ?)''',
+                                        (entry.link, entry.title, company_name,
+                                         entry.get('published'), entry.get('updated'), platform))
+            conn.commit()
+        except Exception as e:
+            print(f"Ошибка {platform}: {e}")
     
     conn.close()
     
@@ -115,25 +115,23 @@ async def check_tenders():
 🔗 {tender['url']}"""
         try:
             await bot.send_message(CHAT_ID, message, parse_mode='Markdown')
-            print(f"Отправлено: {tender['title']}")
-            await asyncio.sleep(1)
+            print(f"✅ Отправлено: {tender['title'][:50]}...")
         except Exception as e:
             print(f"Ошибка отправки: {e}")
 
 # Aiogram handlers
 @dp.message(Command('start'))
 async def start_handler(message: types.Message):
-    await message.reply("🤖 **Бот мониторинга IT-тендеров запущен!**\n\n"
+    await message.reply("🤖 **Бот мониторинга IT-тендеров**\n\n"
                        "**Команды**:\n"
-                       "`/add_company` - 1 компания\n"
-                       "`/load_companies` - список\n"
-                       "`/list` - все компании\n\n"
-                       "ℹ️ Проверка каждые **2 мин** (тест)",
-                       parse_mode='Markdown')
+                       "• `/add_company` - 1 компания\n"
+                       "• `/load_companies` - список\n"
+                       "• `/list` - все компании\n\n"
+                       "ℹ️ Проверка каждые **2 мин**", parse_mode='Markdown')
 
 @dp.message(Command('add_company'))
 async def add_company(message: types.Message, state: FSMContext):
-    await message.reply("➕ **Компания**:\n\n`Газпром 1234567890`", parse_mode='Markdown')
+    await message.reply("➕ **Компания**:\n`Газпром 1234567890`", parse_mode='Markdown')
     await state.set_state(Form.waiting_company)
 
 @dp.message(Form.waiting_company)
@@ -156,8 +154,7 @@ async def load_companies(message: types.Message, state: FSMContext):
     await message.reply("📋 **Список компаний**:\n\n"
                        "`Газпром 1234567890`\n"
                        "`Роснефть 7778889990`\n\n"
-                       "**название + ПРОБЕЛ + ИНН**",
-                       parse_mode='Markdown')
+                       "**название + ПРОБЕЛ + ИНН**", parse_mode='Markdown')
     await state.set_state(Form.waiting_companies_list)
 
 @dp.message(Form.waiting_companies_list)
@@ -169,18 +166,16 @@ async def process_companies_list(message: types.Message, state: FSMContext):
     
     for line in lines:
         line = line.strip()
-        if not line or len(line.split()) < 2: continue
-        try:
-            parts = line.rsplit(maxsplit=1)
-            name, inn = parts[0].strip(), parts[1].strip()
-            c.execute("INSERT OR REPLACE INTO companies (inn, name) VALUES (?, ?)", (inn, name))
-            companies_added += 1
-        except Exception as e:
-            print(f"Ошибка: {e}")
+        if not line or len(line.split()) < 2: 
+            continue
+        parts = line.rsplit(maxsplit=1)
+        name, inn = parts[0].strip(), parts[1].strip()
+        c.execute("INSERT OR REPLACE INTO companies (inn, name) VALUES (?, ?)", (inn, name))
+        companies_added += 1
     
     conn.commit()
     conn.close()
-    await message.reply(f"✅ **Загружено: {companies_added} компаний**\n`/list`", parse_mode='Markdown')
+    await message.reply(f"✅ **Загружено**: {companies_added} компаний\n`/list`", parse_mode='Markdown')
     await state.clear()
 
 @dp.message(Command('list'))
@@ -199,28 +194,36 @@ async def list_companies(message: types.Message):
         await message.reply("📭 **Пусто**\n`/add_company` или `/load_companies`", parse_mode='Markdown')
 
 # FastAPI app
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
+app = FastAPI()
+
+@app.on_event("startup")
+async def on_startup():
     init_db()
-    scheduler.add_job(check_tenders, 'interval', minutes=2)  # Тест 2 мин
+    await bot.set_webhook(WEBHOOK_URL)
+    scheduler.add_job(check_tenders, 'interval', minutes=2)
     scheduler.start()
-    app_state['scheduler'] = scheduler
-    print("🚀 Бот + FastAPI запущены!")
-    yield
-    # Shutdown
+    print(f"🚀 Webhook: {WEBHOOK_URL}")
+    print("✅ FastAPI + Bot запущены!")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await bot.delete_webhook()
     scheduler.shutdown()
 
-app = FastAPI(lifespan=lifespan)
+@app.post(WEBHOOK_PATH)
+async def webhook(update: dict):
+    telegram_update = Update(**update)
+    await dp.feed_update(bot, telegram_update)
+    return {}
 
 @app.get("/")
 async def root():
-    return {"status": "IT Tender Bot running", "companies": "check /list"}
+    return {"status": "IT Tender Bot ✅", "webhook": WEBHOOK_URL}
 
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
