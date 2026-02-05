@@ -29,6 +29,7 @@ scheduler = AsyncIOScheduler()
 
 class Form(StatesGroup):
     waiting_company = State()
+    waiting_companies_list = State()
 
 
 # База данных
@@ -61,7 +62,7 @@ async def check_tenders():
     seen_urls = {{row[0] for row in c.execute("SELECT url FROM seen_tenders")}}
     new_tenders = []
 
-    # RSS ленты площадок (замените на реальные после регистра��ии)
+    # RSS ленты площадок (замените на реальные после регистрации)
     platforms = {{
         # Агрегаторы (все площадки разом)
         'РТС+TenderGuru': 'https://www.rts-tender.ru/rss/rss.ashx',
@@ -155,6 +156,46 @@ async def process_company(message: types.Message, state: FSMContext):
         await message.reply(f"✅ Добавлена компания: {{name}} (ИНН: {{inn}})")
     except:
         await message.reply("❌ Неверный формат. Пример: Газпром 1234567890")
+    await state.clear()
+
+
+@dp.message(Command('load_companies'))
+async def load_companies(message: types.Message, state: FSMContext):
+    """Загрузка списка компаний одной командой"""
+    await message.reply("📋 Отправьте список компаний в формате:\n\n"
+                       "Газпром 1234567890\n"
+                       "Роснефть 7778889990\n"
+                       "Лукойл 1112223330\n\n"
+                       "Одна компания = название + пробел + ИНН на строку")
+    await state.set_state(Form.waiting_companies_list)
+
+@dp.message(Form.waiting_companies_list)
+async def process_companies_list(message: types.Message, state: FSMContext):
+    """Обработка списка компаний"""
+    companies_added = 0
+    lines = message.text.strip().split('\n')
+    
+    conn = sqlite3.connect('tenders.db')
+    c = conn.cursor()
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parts = line.rsplit(maxsplit=1)
+            if len(parts) == 2:
+                name, inn = parts
+                c.execute("INSERT OR REPLACE INTO companies (inn, name) VALUES (?, ?)", (inn, name))
+                companies_added += 1
+        except Exception as e:
+            print(f"Ошибка строки '{{line}}': {{e}}")
+    
+    conn.commit()
+    conn.close()
+    
+    await message.reply(f"✅ Загружено компаний: **{{companies_added}}**\n"
+                       f"📋 Список: /list", parse_mode='Markdown')
     await state.clear()
 
 
