@@ -131,12 +131,21 @@ def collect_tenders(companies: list[tuple[str, str]]) -> list[dict]:
 
     for platform, rss_url in PLATFORMS.items():
         try:
-            feed = feedparser.parse(rss_url)
-            for entry in getattr(feed, "entries", []):
-                title = getattr(entry, "title", "") or ""
-                link = getattr(entry, "link", "") or ""
-                if not link or link in seen_links:
-                    continue
+           feed = feedparser.parse(rss_url)
+for entry in getattr(feed, "entries", []):
+    title = getattr(entry, "title", "") or ""
+    summary = (
+        getattr(entry, "summary", "")
+        or getattr(entry, "description", "")
+        or ""
+    )
+
+    haystack = (title + " " + summary).lower()
+
+    link = getattr(entry, "link", "") or ""
+    if not link or link in seen_links:
+        continue
+
 
                 title_lower = title.lower()
                 # keyword must be present
