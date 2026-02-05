@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -27,11 +28,10 @@ if not BOT_TOKEN:
 
 CHAT_ID = int(os.getenv("CHAT_ID") or "0")
 if CHAT_ID == 0:
-    log.warning("CHAT_ID is not set (0). Bot will NOT be able to send daily digest.")
+    log.warning("CHAT_ID is not set (0). Daily digest will NOT be delivered.")
 
 COMPANIES_RAW = os.getenv("COMPANIES", "").strip()
 
-# Render hostname for webhook
 RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME") or "localhost:8000"
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"https://{RENDER_HOST}{WEBHOOK_PATH}"
@@ -52,12 +52,13 @@ PLATFORMS = {
     "B2B-Center": "https://www.b2b-center.ru/rss/rss.xml",
 }
 
-# Ключевые слова
+# Триггеры: вендоры + типовые ИТ-фразы
 VENDORS_AND_KEYWORDS = [
     "Lenovo", "Dell", "Cisco", "Huawei", "Supermicro", "Nvidia", "NetApp",
     "IBM", "Brocade", "Fortinet", "Juniper", "VMware", "Veeam", "HPE",
-    "HP", "Oracle", "Fujitsu", "EMC", "техническая поддержка", "сервисная поддержка",
-    "консалтинг", "IT услуги", "IT решения", "поставка оборудования"
+    "HP", "Oracle", "Fujitsu", "EMC",
+    "техническая поддержка", "сервисная поддержка", "закупка оборудования",
+    "поставка оборудования", "IT услуги", "IT решения", "консалтинг"
 ]
 
 
@@ -76,7 +77,6 @@ def parse_companies(raw: str) -> list[tuple[str, str]]:
         return []
 
     parts: list[str] = []
-    # allow both ; and newlines
     for chunk in raw.split(";"):
         chunk = chunk.strip()
         if not chunk:
@@ -103,7 +103,7 @@ def companies_to_text(companies: list[tuple[str, str]]) -> str:
 
 
 # ----------------------------
-# BOT
+# BOT / SCHEDULER
 # ----------------------------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -111,20 +111,40 @@ scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
 
 
 # ----------------------------
-# CORE LOGIC
+# CORE LOGIC (KEYWORDS-ONLY)
 # ----------------------------
-def collect_tenders(companies: list[tuple[str, str]]) -> list[dict]:
+def _matches_keywords(haystack_lower: str) -> bool:
+    return any(kw.lower() in haystack_lower for kw in VENDORS_AND_KEYWORDS)
+
+
+async def _parse_feed(url: str):
+    # feedparser.parse is blocking -> run in thread
+    return await asyncio.to_thread(feedparser.parse, url)
+
+
+async def collect_tenders() -> tuple[list[dict], dict]:
     """
-    Collects tenders from RSS *for this run only*.
-    No DB, no history. Dedupe only by URL within this run.
+    Collect tenders matching keywords from RSS feeds.
+    No company matching. Dedupe by URL within this run.
+    Returns: (items, stats)
     """
     found: list[dict] = []
     seen_links: set[str] = set()
 
+    stats = {
+        "platforms": {},
+        "total_entries": 0,
+        "keyword_hits": 0,
+        "results": 0,
+    }
+
     for platform, rss_url in PLATFORMS.items():
         try:
-            feed = feedparser.parse(rss_url)
+            feed = await _parse_feed(rss_url)
             entries = getattr(feed, "entries", []) or []
+            stats["platforms"][platform] = {"entries": len(entries), "bozo": getattr(feed, "bozo", 0)}
+
+            stats["total_entries"] += len(entries)
 
             for entry in entries:
                 title = getattr(entry, "title", "") or ""
@@ -140,83 +160,75 @@ def collect_tenders(companies: list[tuple[str, str]]) -> list[dict]:
                 if not link or link in seen_links:
                     continue
 
-                # keyword must be present (ищем по title+summary)
-                if not any(kw.lower() in haystack for kw in VENDORS_AND_KEYWORDS):
+                if not _matches_keywords(haystack):
                     continue
 
-                # match company in title+summary
-                for company_name, inn in companies:
-                    if company_name.lower() in haystack:
-                        seen_links.add(link)
-                        pub_date = getattr(entry, "published", None) or getattr(entry, "updated", None) or "Неизвестно"
-                        end_date = getattr(entry, "updated", None) or "Неизвестно"
+                stats["keyword_hits"] += 1
+                seen_links.add(link)
 
-                        found.append({
-                            "platform": platform,
-                            "title": title,
-                            "url": link,
-                            "pub_date": str(pub_date),
-                            "end_date": str(end_date),
-                            "company": company_name,
-                            "inn": inn,
-                        })
-                        break
+                pub_date = getattr(entry, "published", None) or getattr(entry, "updated", None) or "Неизвестно"
+                end_date = getattr(entry, "updated", None) or "Неизвестно"
+
+                found.append({
+                    "platform": platform,
+                    "title": title,
+                    "url": link,
+                    "pub_date": str(pub_date),
+                    "end_date": str(end_date),
+                })
 
         except Exception as e:
             log.exception("RSS error on %s: %s", platform, e)
+            stats["platforms"][platform] = {"entries": 0, "error": str(e)}
 
-    return found
+    stats["results"] = len(found)
+    return found, stats
 
 
-async def send_daily_digest():
-    """Runs daily at 10:00 MSK (and manually via /run)"""
-    companies = parse_companies(COMPANIES_RAW)
-
+async def send_daily_digest(target_chat_id: int):
+    """Send digest to target chat."""
     now_msk = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
-    log.info("Digest at %s MSK. Companies: %d", now_msk, len(companies))
 
-    if CHAT_ID == 0:
-        log.warning("CHAT_ID is 0 -> skip sending")
-        return
+    companies = parse_companies(COMPANIES_RAW)
+    companies_line = ", ".join([f"{name} ({inn})" for name, inn in companies]) if companies else "—"
 
-    if not companies:
-        await bot.send_message(
-            CHAT_ID,
-            "⚠️ Нет компаний для мониторинга.\n"
-            "Задай ENV COMPANIES в формате:\n"
-            "Газпром|1234567890",
-        )
-        return
+    tenders, stats = await collect_tenders()
 
-    tenders = collect_tenders(companies)
+    header = (
+        f"📌 Тендеры по ключевым словам — {now_msk} MSK\n"
+        f"Мониторим для: {companies_line}\n\n"
+    )
 
-    # Группируем по компании
-    by_company: dict[str, list[dict]] = {}
-    for t in tenders:
-        by_company.setdefault(t["company"], []).append(t)
-
-    header = f"📌 Тендеры (дайджест) — {now_msk} MSK\n\n"
     if not tenders:
-        msg = header + "Ничего подходящего не нашёл по заданным компаниям/ключевым словам."
-        await bot.send_message(CHAT_ID, msg)
+        msg = (
+            header +
+            "Ничего подходящего не найдено.\n\n"
+            f"Статистика: entries={stats['total_entries']}, keyword_hits={stats['keyword_hits']}, results={stats['results']}"
+        )
+        await bot.send_message(target_chat_id, msg)
         return
+
+    # группируем по площадкам
+    by_platform: dict[str, list[dict]] = {}
+    for t in tenders:
+        by_platform.setdefault(t["platform"], []).append(t)
 
     parts = [header]
-    for company, items in by_company.items():
-        parts.append(f"🏢 {company} — {len(items)}\n")
+    for platform, items in by_platform.items():
+        parts.append(f"🌐 {platform} — {len(items)}\n")
         for it in items[:30]:
             parts.append(
-                f"• {it['platform']} — {it['title']}\n"
+                f"• {it['title']}\n"
                 f"  {it['url']}\n"
             )
         parts.append("\n")
 
-    text = "".join(parts)
+    parts.append(f"Статистика: entries={stats['total_entries']}, keyword_hits={stats['keyword_hits']}, results={stats['results']}\n")
 
-    # Telegram лимит ~4096, режем
+    text = "".join(parts)
     chunks = [text[i:i + 3500] for i in range(0, len(text), 3500)]
     for ch in chunks:
-        await bot.send_message(CHAT_ID, ch)
+        await bot.send_message(target_chat_id, ch)
 
 
 # ----------------------------
@@ -229,17 +241,16 @@ async def start_handler(message: types.Message):
         "Команды:\n"
         "• /list — показать список компаний (из ENV)\n"
         "• /whoami — показать chat_id\n"
-        "• /run — выполнить проверку сейчас\n"
-        "• /debug_rss — проверить, живые ли RSS\n\n"
+        "• /run — выполнить проверку сейчас (ответ придёт сюда же)\n"
+        "• /debug_rss — проверить RSS (entries/bozo)\n\n"
         "Компании задаются через ENV COMPANIES (Название|ИНН).\n"
-        "Рассылка: каждый день в 10:00 МСК."
+        "Рассылка: каждый день в 10:00 МСК (в CHAT_ID)."
     )
 
 
 @dp.message(Command("list"))
 async def list_handler(message: types.Message):
     companies = parse_companies(COMPANIES_RAW)
-    # тут можно Markdown, но безопаснее plain text
     await message.reply(companies_to_text(companies), parse_mode="Markdown")
 
 
@@ -250,10 +261,10 @@ async def whoami_handler(message: types.Message):
 
 @dp.message(Command("run"))
 async def run_now_handler(message: types.Message):
-    log.info("RUN command received from chat_id=%s text=%r", message.chat.id, message.text)
+    log.info("RUN received from chat_id=%s", message.chat.id)
     try:
         await message.reply("⏳ Запускаю проверку…")
-        await send_daily_digest()
+        await send_daily_digest(message.chat.id)
         await message.reply("✅ Готово.")
     except Exception as e:
         log.exception("Error in /run: %s", e)
@@ -264,14 +275,21 @@ async def run_now_handler(message: types.Message):
 async def debug_rss_handler(message: types.Message):
     lines = ["🧪 RSS debug:\n"]
     total = 0
+
     for platform, rss_url in PLATFORMS.items():
         try:
-            feed = feedparser.parse(rss_url)
+            feed = await _parse_feed(rss_url)
             n = len(getattr(feed, "entries", []) or [])
             total += n
-            lines.append(f"{platform}: {n}")
+            bozo = getattr(feed, "bozo", 0)
+            if bozo:
+                err = getattr(feed, "bozo_exception", None)
+                lines.append(f"{platform}: {n} (bozo=1, err={err})")
+            else:
+                lines.append(f"{platform}: {n}")
         except Exception as e:
             lines.append(f"{platform}: ERROR {e}")
+
     lines.append(f"\nTotal entries: {total}")
     await message.reply("\n".join(lines))
 
@@ -281,22 +299,28 @@ async def debug_rss_handler(message: types.Message):
 # ----------------------------
 app = FastAPI()
 
+
 @app.on_event("startup")
 async def on_startup():
     await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
     log.info("Webhook set: %s", WEBHOOK_URL)
 
-    # каждый день в 10:00 по Москве
-    scheduler.add_job(
-        send_daily_digest,
-        "cron",
-        hour=10,
-        minute=0,
-        coalesce=True,
-        max_instances=1,
-    )
+    # каждый день в 10:00 по Москве -> отправка в CHAT_ID
+    if CHAT_ID != 0:
+        scheduler.add_job(
+            lambda: asyncio.create_task(send_daily_digest(CHAT_ID)),
+            "cron",
+            hour=10,
+            minute=0,
+            coalesce=True,
+            max_instances=1,
+        )
+        log.info("Daily digest scheduled at 10:00 MSK to CHAT_ID=%s", CHAT_ID)
+    else:
+        log.warning("Daily digest NOT scheduled because CHAT_ID=0")
+
     scheduler.start()
-    log.info("Scheduler started. Daily digest at 10:00 MSK.")
+    log.info("Scheduler started.")
 
 
 @app.on_event("shutdown")
@@ -326,6 +350,7 @@ async def root():
 
 @app.head("/")
 async def head_root():
+    # to avoid 405 for uptime HEAD probes
     return {}
 
 
