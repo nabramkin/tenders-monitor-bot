@@ -248,7 +248,11 @@ async def run_now_handler(message: types.Message):
 
 @dp.message(Command("whoami"))
 async def whoami_handler(message: types.Message):
-    await message.reply(f"chat_id = `{message.chat.id}`", parse_mode="Markdown")
+    await message.reply(
+        f"👤 <b>Твой chat_id:</b> <code>{message.chat.id}</code>",
+        parse_mode="HTML"
+    )
+
 
 
 # ----------------------------
