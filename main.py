@@ -149,8 +149,8 @@ for entry in getattr(feed, "entries", []):
 
                 title_lower = title.lower()
                 # keyword must be present
-                if not any(kw.lower() in title_lower for kw in VENDORS_AND_KEYWORDS):
-                    continue
+                if not any(kw.lower() in haystack for kw in VENDORS_AND_KEYWORDS):
+    continue
 
                 for company_name, inn in companies:
                     if company_name.lower() in title_lower:
