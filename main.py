@@ -167,5 +167,25 @@ async def on_startup():
     scheduler.start()
     print("🚀 Бот запущен, планировщик активен")
 
+from fastapi import FastAPI
+import uvicorn
+from contextlib import asynccontextmanager
+
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "bot running"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+if __name__ == '__main__':
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
+
 if __name__ == '__main__':
     asyncio.run(dp.start_polling(bot, on_startup=on_startup))
