@@ -5,6 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import feedparser
+import aiohttp
 from fastapi import FastAPI
 import uvicorn
 
@@ -34,12 +35,12 @@ COMPANIES_RAW = os.getenv("COMPANIES", "").strip()
 PORT = int(os.getenv("PORT", "8000"))
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
+
 # ----------------------------
-# RSS (оставил твои; по факту у тебя сейчас живой BiCoTender)
+# RSS
 # ----------------------------
 PLATFORMS = {
     "BiCoTender": "https://www.bicotender.ru/rss.xml",
-    # Остальные можешь включить обратно, но у тебя они часто дают 0 на Render:
     "РосТендер": "https://rostender.info/rss",
     "Bidzaar": "https://bidzaar.com/rss/new",
     "Сбербанк-АСТ": "https://utp.sberbank-ast.ru/rss/rss.xml",
@@ -95,10 +96,29 @@ def matches_keywords(text_lower: str) -> bool:
 
 
 async def parse_feed(url: str):
-    # feedparser.parse блокирует -> в отдельный поток
-    return await asyncio.to_thread(feedparser.parse, url)
+    """
+    Fetch RSS/Atom by HTTP (aiohttp) -> parse text with feedparser.
+    This helps with redirects, user-agent, encoding and gives http/final_url for debug.
+    """
+    timeout = aiohttp.ClientTimeout(total=25)
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)"}
+
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.get(url, allow_redirects=True) as resp:
+            # NOTE: errors="ignore" to avoid decode crashes on bad encodings
+            text = await resp.text(errors="ignore")
+            feed = feedparser.parse(text)
+
+            # add debug info
+            feed.http_status = resp.status
+            feed.final_url = str(resp.url)
+
+            return feed
 
 
+# ----------------------------
+# CORE
+# ----------------------------
 async def collect_tenders() -> tuple[list[dict], dict]:
     found: list[dict] = []
     seen_links: set[str] = set()
@@ -108,11 +128,15 @@ async def collect_tenders() -> tuple[list[dict], dict]:
         try:
             feed = await parse_feed(rss_url)
             entries = getattr(feed, "entries", []) or []
+
             stats["platforms"][platform] = {
                 "entries": len(entries),
+                "http": getattr(feed, "http_status", None),
+                "final_url": getattr(feed, "final_url", ""),
                 "bozo": int(getattr(feed, "bozo", 0)),
-                "err": str(getattr(feed, "bozo_exception", "")) if getattr(feed, "bozo", 0) else ""
+                "err": str(getattr(feed, "bozo_exception", "")) if getattr(feed, "bozo", 0) else "",
             }
+
             stats["total_entries"] += len(entries)
 
             for entry in entries:
@@ -141,7 +165,13 @@ async def collect_tenders() -> tuple[list[dict], dict]:
 
         except Exception as e:
             log.exception("RSS error %s: %s", platform, e)
-            stats["platforms"][platform] = {"entries": 0, "bozo": 1, "err": str(e)}
+            stats["platforms"][platform] = {
+                "entries": 0,
+                "http": None,
+                "final_url": "",
+                "bozo": 1,
+                "err": str(e),
+            }
 
     stats["results"] = len(found)
     return found, stats
@@ -179,10 +209,11 @@ async def send_digest(chat_id: int):
             parts.append(f"- {it['title']}\n  {it['url']}\n")
         parts.append("\n")
 
-    parts.append(f"Статистика: entries={stats['total_entries']}, keyword_hits={stats['keyword_hits']}, results={stats['results']}\n")
+    parts.append(
+        f"Статистика: entries={stats['total_entries']}, keyword_hits={stats['keyword_hits']}, results={stats['results']}\n"
+    )
 
     text = "".join(parts)
-    # Telegram limit ~4096, режем
     chunks = [text[i:i + 3500] for i in range(0, len(text), 3500)]
     for ch in chunks:
         await bot.send_message(chat_id, ch)
@@ -245,24 +276,33 @@ async def run_handler(message: types.Message):
 async def debug_rss_handler(message: types.Message):
     lines = ["RSS debug:\n"]
     total = 0
+
     for platform, rss_url in PLATFORMS.items():
         try:
             feed = await parse_feed(rss_url)
             n = len(getattr(feed, "entries", []) or [])
             total += n
+
             bozo = int(getattr(feed, "bozo", 0))
+            http = getattr(feed, "http_status", None)
+            final_url = getattr(feed, "final_url", "")
+
             if bozo:
-                lines.append(f"{platform}: {n} (bozo=1, err={getattr(feed, 'bozo_exception', None)})")
+                lines.append(
+                    f"{platform}: {n} (http={http}, bozo=1, url={final_url}, err={getattr(feed, 'bozo_exception', None)})"
+                )
             else:
-                lines.append(f"{platform}: {n}")
+                lines.append(f"{platform}: {n} (http={http}, url={final_url})")
+
         except Exception as e:
             lines.append(f"{platform}: ERROR {e}")
+
     lines.append(f"\nTotal entries: {total}")
     await message.reply("\n".join(lines))
 
 
 # ----------------------------
-# FASTAPI (только health)
+# FASTAPI (health endpoints)
 # ----------------------------
 app = FastAPI()
 
@@ -275,7 +315,6 @@ async def on_startup():
     except Exception:
         pass
 
-    # scheduler
     scheduler.add_job(daily_job, "cron", hour=10, minute=0, coalesce=True, max_instances=1)
     scheduler.start()
     log.info("Scheduler started. Daily job at 10:00 MSK. CHAT_ID=%s", CHAT_ID)
