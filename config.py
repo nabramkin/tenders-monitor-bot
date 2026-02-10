@@ -3,10 +3,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 🔧 ЗАМЕНИ НА СВОИ ДАННЫЕ
+# 🔥 ТОЛЬКО ЭТО нужно из Сбера
+GIGACHAT_CLIENT_ID = os.getenv("GIGACHAT_CLIENT_ID")  # твой Client ID
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GIGACHAT_TOKEN = os.getenv("GIGACHAT_TOKEN")
-YOUR_USER_ID = int(os.getenv("YOUR_USER_ID"))  # @userinfobot
+YOUR_USER_ID = int(os.getenv("YOUR_USER_ID"))
 
 # 📋 ТВОИ КОМПАНИИ (добавь свои)
 COMPANIES = [
