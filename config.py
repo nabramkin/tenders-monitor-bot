@@ -3,12 +3,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 🔥 ТОЛЬКО ЭТО нужно из Сбера
-GIGACHAT_CLIENT_ID = os.getenv("GIGACHAT_CLIENT_ID")  # твой Client ID
+
+GIGACHAT_CLIENT_ID = os.getenv("GIGACHAT_CLIENT_ID") 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YOUR_USER_ID = int(os.getenv("YOUR_USER_ID"))
 
-# 📋 ТВОИ КОМПАНИИ (добавь свои)
+# КОМПАНИИ 
 COMPANIES = [
     "АО АКРОН ХОЛДИНГ ИНН6324023665",
     "ПАО Совкомбанк  ИНН4401116480",
