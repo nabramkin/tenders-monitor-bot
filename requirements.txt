@@ -1,9 +1,6 @@
-aiogram==3.13.1
-python-dotenv==1.0.1
+telebot==6.7.2
 requests==2.32.3
 beautifulsoup4==4.12.3
-aioschedule==0.7.1
+python-dotenv==1.0.1
+APScheduler==3.10.4  # ← Лучше!
 aiohttp==3.10.5
-gunicorn==22.0.0
-flask==3.0.3
-lxml==5.3.0
