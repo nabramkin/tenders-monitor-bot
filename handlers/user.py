@@ -2,7 +2,8 @@ from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 from utils.gigachat import GigaChatClient
-from config import COMPANIES  # Только то, что точно есть!
+from config import COMPANIES 
+import os 
 
 router = Router()
 
