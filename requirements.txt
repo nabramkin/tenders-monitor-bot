@@ -4,5 +4,4 @@ beautifulsoup4==4.12.3
 APScheduler==3.10.4
 aiohttp==3.10.5
 flask==3.0.3 
-gigachat==1.2.0
 
