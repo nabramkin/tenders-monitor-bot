@@ -1,21 +1,19 @@
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+# Render автоматически загружает Environment Variables
+# load_dotenv() НЕ НУЖЕН в Render!
 
-
-GIGACHAT_CLIENT_ID = os.getenv("GIGACHAT_CLIENT_ID") 
+GIGACHAT_CLIENT_ID = os.getenv("GIGACHAT_CLIENT_ID")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-YOUR_USER_ID = int(os.getenv("YOUR_USER_ID"))
+YOUR_USER_ID = int(os.getenv("YOUR_USER_ID") or 0)  # Защита от None
 
-# КОМПАНИИ 
+# Остальное без изменений
 COMPANIES = [
     "АО АКРОН ХОЛДИНГ ИНН6324023665",
-    "ПАО Совкомбанк  ИНН4401116480",
+    "ПАО Совкомбанк  ИНН4401116480", 
     "АО СЛПК ИНН1121003135",
 ]
 
-# 💻 ИТ ФИЛЬТРЫ
 IT_VENDORS = [
     "Cisco", "HPE", "Dell", "Lenovo", "IBM", "Oracle", 
     "Microsoft", "VMware", "Huawei", "Fortinet", "Brocade",
