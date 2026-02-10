@@ -10,7 +10,7 @@ client = GigaChatClient()
 @router.message(CommandStart(), F.from_user.id == YOUR_USER_ID)
 async def start(message: Message):
     await message.answer(
-        "🤖 <b>ИТ-Тендеры Бот</b>\n\n"
+        "🤖 <b>Твой Супер IT БОТ</b>\n\n"
         "✅ <b>Автоотчёты:</b> 10:00-12:00 ежедневно\n"
         "💬 Задавай вопросы GigaChat\n"
         "📋 /companies — список компаний\n"
