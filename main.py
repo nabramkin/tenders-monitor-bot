@@ -1,32 +1,27 @@
 import asyncio
 import os
 import logging
-
 from flask import Flask
-
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ParseMode
 from aiogram.client.default import DefaultBotProperties
-
 from config import BOT_TOKEN, YOUR_USER_ID
 from handlers.user import router as user_router
 from scheduler import start_scheduler
 
-
-# Flask только для ping /health
+# Flask для health‑чека (	Render / UptimeRobot)
 app = Flask(__name__)
 
-@app.route('/')
-@app.route('/health')
-def ping():
-    return "✅ Bot alive! 👋"
-
+@app.route("/")
+@app.route("/health")
+def health():
+    return "✅ Bot + Flask health check OK"
 
 logging.basicConfig(level=logging.INFO)
 
 
-async def main():
+async def run_bot():
     bot = Bot(
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -34,27 +29,10 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(user_router)
 
-    # Сообщение о старте (опционально)
-    try:
-        await bot.send_message(chat_id=YOUR_USER_ID, text="✅ Бот запущен!")
-    except Exception as _:
-        pass
-
     scheduler_task = asyncio.create_task(start_scheduler(bot))
 
     try:
-        # Бот: polling + Flask в отдельном потоке
-        await asyncio.gather(
-            dp.start_polling(bot, skip_updates=True),
-            asyncio.to_thread(
-                lambda: app.run(
-                    host="0.0.0.0",
-                    port=int(os.environ.get("PORT", 10000)),
-                    debug=False,
-                    use_reloader=False
-                )
-            )
-        )
+        await dp.start_polling(bot, skip_updates=True)
     except (KeyboardInterrupt, SystemExit):
         logging.info("🛑 Остановка бота...")
     finally:
@@ -65,4 +43,18 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.environ.get("PORT", 10000))
+
+    def run_flask():
+        app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False
+        )
+
+    from threading import Thread
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    asyncio.run(run_bot())
