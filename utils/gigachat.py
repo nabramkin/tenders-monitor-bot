@@ -45,7 +45,7 @@ class GigaChatClient:
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.post(
-                self.token_slash,
+                self.token_url,
                 headers=headers,
                 auth=aiohttp.BasicAuth(self.client_id, self.client_id),
                 data=data,
