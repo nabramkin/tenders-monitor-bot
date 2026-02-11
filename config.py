@@ -5,6 +5,7 @@ import os
 
 GIGACHAT_CLIENT_ID = os.getenv("GIGACHAT_CLIENT_ID")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY")
 YOUR_USER_ID = int(os.getenv("YOUR_USER_ID") or 0)  # Защита от None
 
 # Остальное без изменений
