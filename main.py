@@ -4,13 +4,13 @@ import logging
 from flask import Flask
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.enums import ParseMode          # ← вот так правильно для 3.13+
+from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from config import BOT_TOKEN, YOUR_USER_ID
 from handlers.user import router as user_router
 from scheduler import start_scheduler
 
-# Flask для health‑чека (Render / UptimeRobot)
+# Flask для health-чeka (Render / UptimeRobot)
 app = Flask(__name__)
 
 @app.route("/")
@@ -27,11 +27,12 @@ async def run_bot():
     )
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(user_router)
-  
+    
+    # ✅ КРИТИЧНО: очищаем старые webhook/getUpdates
+    await bot.delete_webhook(drop_pending_updates=True)
+    
     scheduler_task = asyncio.create_task(start_scheduler(bot))
-await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, skip_updates=True)
-
+    
     try:
         await dp.start_polling(bot, skip_updates=True)
     except (KeyboardInterrupt, SystemExit):
@@ -41,7 +42,6 @@ await bot.delete_webhook(drop_pending_updates=True)
         if not scheduler_task.done():
             scheduler_task.cancel()
         logging.info("✅ Все сервисы остановлены.")
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
