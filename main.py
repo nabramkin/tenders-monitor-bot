@@ -4,13 +4,13 @@ import logging
 from flask import Flask
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ParseMode
+from aiogram.enums import ParseMode          # ← вот так правильно для 3.13+
 from aiogram.client.default import DefaultBotProperties
 from config import BOT_TOKEN, YOUR_USER_ID
 from handlers.user import router as user_router
 from scheduler import start_scheduler
 
-# Flask для health‑чека (	Render / UptimeRobot)
+# Flask для health‑чека (Render / UptimeRobot)
 app = Flask(__name__)
 
 @app.route("/")
