@@ -20,7 +20,6 @@ def health():
 
 logging.basicConfig(level=logging.INFO)
 
-
 async def run_bot():
     bot = Bot(
         token=BOT_TOKEN,
@@ -28,8 +27,10 @@ async def run_bot():
     )
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(user_router)
-
+  
     scheduler_task = asyncio.create_task(start_scheduler(bot))
+await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot, skip_updates=True)
 
     try:
         await dp.start_polling(bot, skip_updates=True)
