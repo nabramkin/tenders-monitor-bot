@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from config import GIGACHAT_CLIENT_ID
 from aiogram import Bot
 from typing import Optional
+from aiohttp import FormData
 
 class GigaChatClient:
     def __init__(self):
@@ -26,40 +27,46 @@ class GigaChatClient:
             return True
         return datetime.utcnow() >= self.token_expires_at
 
-    async def _ensure_token(self):
-        if not self._is_token_expired_or_invalid():
-            return self.access_token
 
-        auth_string = f"{self.client_id}:{self.client_id}"
-        auth_b64 = base64.b64encode(auth_string.encode()).decode()
 
-        headers = {
-            'Content-Type': 'application/x-www-urlencoded',
-            'Accept': 'application/json',
-            'RqUID': str(uuid.uuid4())
-        }
-        data = {'scope': 'GIGACHAT_API_PERS'}
+async def _ensure_token(self):
+    if not self._is_token_expired_or_invalid():
+        return self.access_token
 
-        connector = aiohttp.TCPConnector(ssl=self.ssl_context)
-        timeout = aiohttp.ClientTimeout(total=30)
+    auth_string = f"{self.client_id}:{self.client_id}"
+    auth_b64 = base64.b64encode(auth_string.encode()).decode()
 
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            async with session.post(
-                self.token_url,
-                headers=headers,
-                auth=aiohttp.BasicAuth(self.client_id, self.client_id),
-                data=data,
-            ) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    self.access_token = result["access_token"]
-                    # Аккуратно: если GigaChat даёт ttl (в секундах)
-                    ttl = result.get("expires_in", 1800)  # 30 мин
-                    self.token_expires_at = datetime.utcnow() + timedelta(seconds=ttl - 60)
-                    return self.access_token
-                else:
-                    error_text = await resp.text()
-                    raise Exception(f"Token error {resp.status}: {error_text}")
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "RqUID": str(uuid.uuid4()),
+    }
+
+    data = aiohttp.formdata.FormData()
+    data.add_field("scope", "GIGACHAT_API_PERS")
+    # ИЛИ (проще)
+    # data = {"scope": "GIGACHAT_API_PERS"}
+
+    connector = aiohttp.TCPConnector(ssl=self.ssl_context)
+    timeout = aiohttp.ClientTimeout(total=30)
+
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        async with session.post(
+            self.token_url,
+            headers=headers,
+            auth=aiohttp.BasicAuth(self.client_id, self.client_id),
+            data=data,   # именно как form/urlencode, не json
+        ) as resp:
+            if resp.status == 200:
+                result = await resp.json()
+                self.access_token = result["access_token"]
+                ttl = result.get("expires_in", 1800)
+                self.token_expires_at = datetime.utcnow() + timedelta(seconds=ttl - 60)
+                return self.access_token
+            else:
+                error_text = await resp.text()
+                raise Exception(f"Token error {resp.status}: {error_text}")
+
 
     async def get_token(self):
         """Публичный getter, всегда проверяет срок действия."""
