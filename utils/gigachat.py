@@ -1,22 +1,18 @@
 import aiohttp
-import base64
 import uuid
-import os
 import ssl
 from datetime import datetime, timedelta
-from config import GIGACHAT_CLIENT_ID
-from aiogram import Bot
-from typing import Optional
-from aiohttp import FormData
+from config import GIGACHAT_AUTH_KEY  # ← ТВОЙ "Ключ авторизации" из кабинета Сбера!
 
 class GigaChatClient:
     def __init__(self):
-        self.client_id = GIGACHAT_CLIENT_ID
+        self.auth_key = GIGACHAT_AUTH_KEY
         self.access_token = None
         self.token_expires_at = None
         self.base_url = "https://gigachat.devices.sberbank.ru/api/v1"
-        self.token_url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"  # ← правильно
+        self.token_url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
         
+        # SSL без проверки (для Сбера)
         self.ssl_context = ssl.create_default_context()
         self.ssl_context.check_hostname = False
         self.ssl_context.verify_mode = ssl.CERT_NONE
@@ -30,14 +26,14 @@ class GigaChatClient:
         if not self._is_token_expired_or_invalid():
             return self.access_token
 
-        # ✅ ТОЧНО ПРАВИЛЬНЫЕ HEADERS для GigaChat
+        # ✅ HEADERS по документации Сбера
         headers = {
             'Content-Type': 'application/x-www-form-urlencoded',
             'Accept': 'application/json',
-            'RqUID': str(uuid.uuid4())
+            'RqUID': str(uuid.uuid4()),
+            'Authorization': f'Basic {self.auth_key}'  # ← ТВОЙ ГОТОВЫЙ КЛЮЧ!
         }
         
-        # ✅ Form data - не JSON!
         form_data = {'scope': 'GIGACHAT_API_PERS'}
 
         connector = aiohttp.TCPConnector(ssl=self.ssl_context)
@@ -45,10 +41,9 @@ class GigaChatClient:
         
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.post(
-                self.token_url,  # ← НЕ token_slash!
+                self.token_url,
                 headers=headers,
-                auth=aiohttp.BasicAuth(self.client_id, self.client_id),
-                data=form_data  # ← обычный dict работает как form-urlencoded
+                data=form_data
             ) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -83,7 +78,7 @@ class GigaChatClient:
             async with session.post(
                 f"{self.base_url}/chat/completions",
                 headers=headers,
-                json=payload  # ← JSON для chat!
+                json=payload
             ) as resp:
                 if resp.status == 200:
                     result = await resp.json()
