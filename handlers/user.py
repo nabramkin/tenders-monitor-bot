@@ -1,65 +1,124 @@
 from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from utils.gigachat import GigaChatClient
-from config import COMPANIES, YOUR_USER_ID
+from config import COMPANIES, YOUR_USER_ID, IT_VENDORS, IT_KEYWORDS
 from scrapers.contests import scrape_all_sites
 import asyncio
 
 router = Router()
 
+# Состояния для FSM (если нужно)
+class Form(StatesGroup):
+    waiting_company = State()
+
 @router.message(Command("start"))
-async def start_cmd(message: Message):
+async def cmd_start(message: Message):
+    """Стартовая команда"""
     await message.answer(
-        "🤖 <b>ИТ-Тендеры Bot готов!</b>\n\n"
-        f"🏢 Отслеживаю <b>{len(COMPANIES)}</b> компаний\n"
-        "📡 Пиши название компании или 'все тендеры'"
+        "🤖 <b>ИТ-Тендеры Bot</b>\n\n"
+        f"🏢 Отслеживаю <b>{len(COMPANIES)}</b> компаний\n\n"
+        "<b>Команды:</b>\n"
+        "/list — список всех компаний\n"
+        "/tenders — свежие тендеры\n"
+        "/debug — диагностика парсера\n"
+        "АКРОН — тендеры конкретной компании\n\n"
+        "💬 Пиши название компании для отчёта!"
     )
 
-@router.message(F.text, F.from_user.id == YOUR_USER_ID)
-async def handle_message(message: Message):
+@router.message(Command("list"))
+async def cmd_list(message: Message):
+    """Список всех компаний"""
+    companies_text = "<b>🏢 Твои компании ({len(COMPANIES)}):</b>\n\n"
+    for i, company in enumerate(COMPANIES[:20], 1):
+        companies_text += f"{i}. {company}\n"
+    if len(COMPANIES) > 20:
+        companies_text += f"\n... и ещё {len(COMPANIES)-20}"
+    
+    await message.answer(companies_text, parse_mode="HTML")
+
+@router.message(Command("tenders"))
+async def cmd_tenders(message: Message):
+    """Все свежие тендеры"""
     try:
-        # АВТО: парсим + фильтруем ВСЕ 20+ компаний
         tenders = await scrape_all_sites()
-        company_inns = [c.split()[-1] for c in COMPANIES]
+        if not tenders:
+            await message.answer("❌ Тендеры не найдены")
+            return
         
-        # Контекст для GigaChat (ТОЛЬКО твои компании)
-        context = f"📊 АКТУАЛЬНЫЕ ИТ-ТЕНДЕРЫ ({len(COMPANIES)} компаний):\n\n"
-        your_tenders = []
+        msg = f"<b>📊 Свежие тендеры ({len(tenders)}):</b>\n\n"
+        for i, t in enumerate(tenders[:10], 1):
+            msg += f"{i}. <b>{t['company']}</b>\n   {t['title'][:70]}...\n   <a href='{t['url']}'>{t['source']}</a>\n\n"
         
-        for t in tenders:
-            for inn in company_inns:
-                if inn in str(t).lower():
-                    your_tenders.append(t)
-                    context += f"✅ {t['company']}: {t['title'][:70]} [{t['source']}]\n"
-                    break
-        
-        if not your_tenders:
-            context += "❌ Свежих тендеров твоих компаний нет\n"
-        
-        context += f"\n🏢 Компании: " + ", ".join([c.split()[0] for c in COMPANIES[:6]]) + "..."
-        
-        # GigaChat с умным контекстом
-        messages = [
-            {"role": "system", "content": "Ты эксперт по ИТ-тендерам. Используй только данные из контекста."},
-            {"role": "user", "content": f"{context}\n\nВопрос: {message.text}"}
-        ]
-        
-        client = GigaChatClient()
-        response = await client.chat_completion(messages)
-        await message.answer(response)
-        
+        await message.answer(msg, parse_mode="HTML")
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
+        await message.answer(f"❌ Ошибка парсера: {e}")
 
 @router.message(Command("debug"))
-async def debug(message: Message):
-    tenders = await scrape_all_sites()
-    await message.answer(f"🔍 Найдено тендеров: {len(tenders)}")
-    await message.answer(
-        "✅ <b>Бот работает! GigaChat автообновление активно.</b>",
-        parse_mode="HTML"
-    )
+async def cmd_debug(message: Message):
+    """Диагностика"""
+    try:
+        tenders = await scrape_all_sites()
+        msg = f"🔍 <b>Диагностика:</b>\n\n📊 Всего тендеров: {len(tenders)}\n🏢 Компаний: {len(COMPANIES)}"
+        await message.answer(msg, parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ {e}")
+
+@router.message(Command("status"))
+async def cmd_status(message: Message):
+    """Статус бота"""
+    await message.answer("✅ Бот работает!")
+
+# GigaChat ТОЛЬКО для запросов о компаниях/тендерах
+@router.message(F.text & F.from_user.id == YOUR_USER_ID)
+async def handle_gigachat(message: Message):
+    text = message.text.lower().strip()
+    
+    # ПРОВЕРКА: команда или название компании?
+    if any(cmd in text for cmd in ["/start", "/list", "/tenders", "/debug", "/status"]):
+        return  # Команда — игнорируем
+    
+    # Ищем компанию в списке
+    company_found = None
+    for company in COMPANIES:
+        if any(word in text for word in company.lower().split()[:3]):  # Первые 3 слова компании
+            company_found = company
+            break
+    
+    # Если нашли компанию — GigaChat с контекстом
+    if company_found:
+        try:
+            tenders = await scrape_all_sites()
+            company_inns = [c.split()[-1] for c in COMPANIES]
+            
+            context = f"🏢 Компания: {company_found}\n\n"
+            company_tenders = []
+            
+            for t in tenders:
+                if any(inn in str(t).lower() for inn in company_inns):
+                    if company_found.lower() in str(t).lower():
+                        company_tenders.append(t)
+                        context += f"✅ {t['title'][:60]} [{t['source']}]\n"
+            
+            if not company_tenders:
+                context += "❌ Свежих тендеров нет\n"
+            
+            messages = [
+                {"role": "system", "content": "Ты эксперт по ИТ-тендерам этой компании."},
+                {"role": "user", "content": f"{context}\nВопрос: {message.text}"}
+            ]
+            
+            client = GigaChatClient()
+            response = await client.chat_completion(messages)
+            await message.answer(response)
+            
+        except Exception as e:
+            await message.answer(f"❌ Ошибка GigaChat: {e}")
+    else:
+        # Не компания — обычный ответ
+        await message.answer("🏢 Напиши название компании из списка (/list)")
 
 
 @router.message(Command("test_parse"), F.from_user.id == YOUR_USER_ID)
