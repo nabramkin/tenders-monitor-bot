@@ -1,7 +1,7 @@
 import asyncio
 import os
 import logging
-from flask import Flask
+from flask import Flask, request
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ParseMode
@@ -9,31 +9,87 @@ from aiogram.client.default import DefaultBotProperties
 from config import BOT_TOKEN, YOUR_USER_ID
 from handlers.user import router as user_router
 from scheduler import start_scheduler
+import threading
 
-# Flask для health-чека (Render / UptimeRobot)
+# Flask для Render (ОБЯЗАТЕЛЬНО!)
 app = Flask(__name__)
 
 @app.route("/")
 @app.route("/health")
 def health():
-    return "✅ Bot + Flask health check OK"
+    return "✅ Bot health OK - Render port detected!"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def cleanup_webhook(bot: Bot):
-    """ЖЁСТКОЕ удаление ВСЕХ вебхуков + проверка"""
+# Глобальные переменные для бота
+bot_instance = None
+dp_instance = None
+
+async def cleanup_webhook(bot):
+    """Жёсткое удаление webhook"""
     try:
-        # Проверяем текущий статус
         webhook_info = await bot.get_webhook_info()
-        logger.info(f"🔍 Webhook статус: url={webhook_info.url}, pending={webhook_info.pending_update_count}")
+        logger.info(f"🔍 Webhook: {webhook_info.url}")
         
-        # Удаляем ВЕБХУК 3 раза (на всякий случай)
-        for i in range(3):
-            result = await bot.delete_webhook(drop_pending_updates=True)
-            logger.info(f"🧹 Webhook #{i+1} удалён: {result}")
-            await asyncio.sleep(1)
+        for _ in range(3):
+            await bot.delete_webhook(drop_pending_updates=True)
+            await asyncio.sleep(0.5)
         
+        final_info = await bot.get_webhook_info()
+        logger.info(f"✅ Webhook чист: {final_info.url is None}")
+    except Exception as e:
+        logger.error(f"Webhook cleanup error: {e}")
+
+async def start_bot():
+    """Запуск бота в фоне"""
+    global bot_instance, dp_instance
+    
+    bot_instance = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
+    
+    await cleanup_webhook(bot_instance)
+    
+    dp_instance = Dispatcher(storage=MemoryStorage())
+    dp_instance.include_router(user_router)
+    
+    scheduler_task = asyncio.create_task(start_scheduler(bot_instance))
+    
+    try:
+        logger.info("🚀 Bot polling started")
+        await dp_instance.start_polling(
+            bot_instance,
+            skip_updates=True
+        )
+    except Exception as e:
+        logger.error(f"❌ Bot error: {e}")
+    finally:
+        await bot_instance.session.close()
+        if scheduler_task and not scheduler_task.done():
+            scheduler_task.cancel()
+
+def run_bot_thread():
+    """Бот в отдельном потоке asyncio"""
+    try:
+        asyncio.run(start_bot())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped")
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    
+    # 1. Flask запускается ПЕРВЫМ (Render увидит порт!)
+    logger.info(f"🌐 Flask на порту {port}")
+    threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, debug=False),
+        daemon=True
+    ).start()
+    
+    # 2. Бот запускается ВТОРЫМ (не блокирует Flask)
+    logger.info("🤖 Starting bot...")
+    run_bot_thread()
         # Финальная проверка
         webhook_info = await bot.get_webhook_info()
         if webhook_info.url or webhook_info.pending_update_count > 0:
